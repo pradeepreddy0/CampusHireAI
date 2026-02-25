@@ -1,0 +1,24 @@
+# ============================================================
+# CampusHireAI — Backend Dependencies
+# Install with:  pip install -r requirements.txt
+# ============================================================
+
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+supabase==2.3.4
+httpx==0.25.2
+gotrue==2.4.2
+python-dotenv==1.0.0
+python-multipart==0.0.6
+
+# Auth
+bcrypt==4.1.2
+python-jose[cryptography]==3.3.0
+
+# Resume parsing
+pdfplumber==0.11.0
+spacy==3.7.2
+
+# Data export
+pandas==2.1.4
+openpyxl==3.1.2
