@@ -33,6 +33,8 @@ CREATE TABLE drives (
     eligibility_cgpa NUMERIC(4, 2) DEFAULT 0.00,
     required_skills  JSONB DEFAULT '[]'::jsonb,   -- e.g. ["Python", "SQL", "React"]
     deadline         TIMESTAMPTZ,
+    package          NUMERIC(10, 2) DEFAULT 0.00, -- offered CTC/LPA (for 1.7× filter)
+    jd_url           TEXT,                         -- Supabase Storage URL for JD PDF/DOCX
     created_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -43,8 +45,9 @@ CREATE TABLE applications (
     id          SERIAL PRIMARY KEY,
     student_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     drive_id    INTEGER NOT NULL REFERENCES drives(id) ON DELETE CASCADE,
+    resume_id   INTEGER,                          -- links to the resume used for this application
     status      TEXT NOT NULL DEFAULT 'Applied'
-                CHECK (status IN ('Applied', 'Shortlisted', 'Rejected', 'Offered')),
+                CHECK (status IN ('Applied', 'Shortlisted', 'Rejected', 'Offered', 'Placed')),
     ai_score    NUMERIC(5, 2) DEFAULT 0.00,
     applied_at  TIMESTAMPTZ DEFAULT NOW(),
 
@@ -53,10 +56,12 @@ CREATE TABLE applications (
 );
 
 -- ──────────────────────────────────────────────
--- 4. RESUME_METADATA — extracted resume info
+-- 4. RESUME_METADATA — extracted resume info (multiple per student)
 -- ──────────────────────────────────────────────
 CREATE TABLE resume_metadata (
-    student_id         UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    id                 SERIAL PRIMARY KEY,
+    student_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    label              TEXT DEFAULT 'Resume',        -- e.g. "General", "SDE Resume", "Data Science"
     resume_url         TEXT,
     extracted_skills   JSONB DEFAULT '[]'::jsonb,   -- ["Python", "React", ...]
     extracted_projects JSONB DEFAULT '[]'::jsonb,   -- [{"name": "...", "desc": "..."}]
@@ -71,7 +76,7 @@ CREATE TABLE training_resources (
     skill  TEXT NOT NULL,
     title  TEXT NOT NULL,
     link   TEXT,
-    type   TEXT           -- e.g. "video", "article", "course"
+    type   TEXT           -- e.g. "video", "article", "course", "blog"
 );
 
 -- ──────────────────────────────────────────────
@@ -86,8 +91,37 @@ CREATE TABLE offers (
 );
 
 -- ──────────────────────────────────────────────
+-- 7. INTERVIEW_EXPERIENCES — previous year Q&A + tips
+-- ──────────────────────────────────────────────
+CREATE TABLE interview_experiences (
+    id          SERIAL PRIMARY KEY,
+    drive_id    INTEGER REFERENCES drives(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL,                 -- questions / experience write-up
+    tips        TEXT,                          -- admin tips for preparation
+    added_by    UUID REFERENCES users(id),
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ──────────────────────────────────────────────
+-- 8. STUDENT_REVIEWS — placed students review companies
+-- ──────────────────────────────────────────────
+CREATE TABLE student_reviews (
+    id          SERIAL PRIMARY KEY,
+    student_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    drive_id    INTEGER REFERENCES drives(id) ON DELETE CASCADE,
+    company     TEXT NOT NULL,
+    rating      INTEGER CHECK (rating >= 1 AND rating <= 5),
+    content     TEXT NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ──────────────────────────────────────────────
 -- Indexes for common queries
 -- ──────────────────────────────────────────────
 CREATE INDEX idx_applications_drive   ON applications(drive_id);
 CREATE INDEX idx_applications_student ON applications(student_id);
 CREATE INDEX idx_offers_student       ON offers(student_id);
+CREATE INDEX idx_experiences_drive    ON interview_experiences(drive_id);
+CREATE INDEX idx_reviews_drive        ON student_reviews(drive_id);
+CREATE INDEX idx_reviews_student      ON student_reviews(student_id);

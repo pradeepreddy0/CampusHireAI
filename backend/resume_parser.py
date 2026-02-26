@@ -93,67 +93,154 @@ def extract_skills(text: str) -> List[str]:
     return found_skills
 
 
+def _is_description_line(line: str) -> bool:
+    """
+    Decide whether a line is a description/bullet point (True)
+    or a project title (False).
+
+    Description lines typically:
+      - Start with bullet characters (•, -, *, etc.)
+      - Start with common action/past-tense verbs
+      - Are long sentences (> 60 chars without separators like | or –)
+      - Start with lowercase letters
+    """
+    stripped = line.strip()
+    if not stripped:
+        return True
+
+    # 1. Bullet / symbol prefix => always a description
+    if re.match(r'^[•\-\*◦▪○●→▸►✓✔☑]\s*', stripped):
+        return True
+
+    # 2. Starts with a lowercase letter => description continuation
+    if stripped[0].islower():
+        return True
+
+    # 3. Starts with common action verbs used in project descriptions
+    action_verbs = (
+        "Developed", "Built", "Created", "Implemented", "Designed",
+        "Integrated", "Used", "Utilized", "Deployed", "Configured",
+        "Managed", "Led", "Worked", "Collaborated", "Improved",
+        "Optimized", "Reduced", "Increased", "Achieved", "Established",
+        "Wrote", "Tested", "Debugged", "Resolved", "Fixed",
+        "Added", "Updated", "Maintained", "Migrated", "Refactored",
+        "Automated", "Analyzed", "Researched", "Conducted", "Performed",
+        "Ensured", "Enhanced", "Enabled", "Generated", "Processed",
+        "Transformed", "Applied", "Leveraged", "Incorporated",
+        "Responsible", "Assisted", "Supported", "Contributed",
+        "Constructed", "Programmed", "Engineered", "Architected",
+        "Streamlined", "Spearheaded", "Initiated", "Orchestrated",
+        "Secured", "Handled", "Executed", "Delivered", "Published",
+        "Presented", "Trained", "Mentored", "Supervised",
+        "The", "This", "It ", "A ", "An ",
+    )
+    for verb in action_verbs:
+        if stripped.startswith(verb):
+            return True
+
+    # 4. Long lines without title-separators are likely descriptions
+    has_separator = bool(re.search(r'[|–—:]', stripped))
+    if len(stripped) > 80 and not has_separator:
+        return True
+
+    return False
+
+
 def extract_projects(text: str) -> List[Dict]:
     """
-    Simple project extraction — looks for common section headers
-    like "Projects", "Academic Projects", etc. and captures the
-    lines underneath as project entries.
+    Project extraction that uses title detection heuristics.
 
-    Returns a list of dicts: [{"name": "...", "description": "..."}]
+    A line is a PROJECT TITLE if it:
+      - Does NOT start with action verbs (Developed, Built, etc.)
+      - Does NOT start with bullet characters
+      - Is relatively short or contains separators (|, –, :)
+      - Starts with an uppercase letter
+
+    Everything else gets appended as description to the current project.
+
+    Returns a list of dicts: [{"name": "...", "desc": "..."}]
     """
     projects = []
     lines = text.split("\n")
     in_projects_section = False
+    current_project = None
+
+    section_header_re = re.compile(
+        r'^(education|experience|work experience|skills|technical skills'
+        r'|certifications|achievements|awards|hobbies|interests'
+        r'|references|publications|summary|objective|contact'
+        r'|extra.?curricular|co.?curricular|activities)',
+        re.IGNORECASE,
+    )
+    project_section_re = re.compile(
+        r'^(projects|academic projects|personal projects|major projects'
+        r'|mini projects|key projects|selected projects)',
+        re.IGNORECASE,
+    )
+    bullet_clean_re = re.compile(r'^[•\-\*◦▪○●→▸►✓✔☑]\s*')
 
     for line in lines:
         stripped = line.strip()
-        # Detect project section headers
-        if re.match(r'^(projects|academic projects|personal projects)', stripped, re.IGNORECASE):
+        if not stripped:
+            continue
+
+        # Detect project section start
+        if project_section_re.match(stripped):
             in_projects_section = True
             continue
 
-        # Stop when we hit the next section header
-        if in_projects_section and re.match(r'^(education|experience|skills|certifications|achievements)', stripped, re.IGNORECASE):
+        if not in_projects_section:
+            continue
+
+        # Stop when we hit the next section
+        if section_header_re.match(stripped):
             break
 
-        # Capture non-empty lines as project entries
-        if in_projects_section and stripped:
-            projects.append({
-                "name": stripped[:80],         # First 80 chars as name
-                "description": stripped,
-            })
+        if _is_description_line(line):
+            # This is a description / bullet — attach to current project
+            clean = bullet_clean_re.sub('', stripped).strip()
+            if current_project and clean:
+                if current_project["desc"]:
+                    current_project["desc"] += " • " + clean
+                else:
+                    current_project["desc"] = clean
+        else:
+            # This looks like a project TITLE
+            if current_project:
+                projects.append(current_project)
+
+            current_project = {
+                "name": stripped[:150],
+                "desc": "",
+            }
+
+    # Don't forget the last project
+    if current_project:
+        projects.append(current_project)
 
     return projects
 
 
-async def upload_and_parse_resume(file_bytes: bytes, filename: str, student_id: str) -> dict:
+async def upload_and_parse_resume(file_bytes: bytes, filename: str, student_id: str, label: str = "Resume") -> dict:
     """
     Full resume processing pipeline:
       1. Upload PDF to Supabase Storage
       2. Extract text with pdfplumber
       3. Extract skills and projects
-      4. Upsert data into resume_metadata table
-      5. Return extracted data
-
-    Args:
-        file_bytes: Raw PDF file content
-        filename:   Original filename (e.g. "resume.pdf")
-        student_id: UUID of the student
-
-    Returns:
-        dict with resume_url, extracted_skills, extracted_projects
+      4. Insert data into resume_metadata table (supports multiple resumes)
+      5. Return extracted data with resume_id
     """
     # --- 1. Upload to Supabase Storage ---
-    storage_path = f"resumes/{student_id}/{filename}"
+    import time
+    ts = int(time.time())
+    storage_path = f"resumes/{student_id}/{ts}_{filename}"
 
-    # Upload file (overwrite if exists)
     supabase.storage.from_("resumes").upload(
         path=storage_path,
         file=file_bytes,
         file_options={"content-type": "application/pdf", "upsert": "true"},
     )
 
-    # Get public URL for the uploaded file
     resume_url = supabase.storage.from_("resumes").get_public_url(storage_path)
 
     # --- 2. Extract text ---
@@ -163,17 +250,23 @@ async def upload_and_parse_resume(file_bytes: bytes, filename: str, student_id: 
     skills = extract_skills(text)
     projects = extract_projects(text)
 
-    # --- 4. Upsert into resume_metadata ---
-    supabase.table("resume_metadata").upsert({
+    # --- 4. Insert into resume_metadata (multiple resumes allowed) ---
+    resp = supabase.table("resume_metadata").insert({
         "student_id": student_id,
+        "label": label,
         "resume_url": resume_url,
         "extracted_skills": skills,
         "extracted_projects": projects,
     }).execute()
 
+    resume_id = resp.data[0]["id"] if resp.data else None
+
     # --- 5. Return extracted data ---
     return {
+        "resume_id": resume_id,
+        "label": label,
         "resume_url": resume_url,
         "extracted_skills": skills,
         "extracted_projects": projects,
     }
+

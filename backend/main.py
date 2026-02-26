@@ -11,6 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import io
+import os
+import uuid as uuid_lib
 
 # ── Local module imports ─────────────────────────────────────
 from database import supabase
@@ -30,26 +32,30 @@ from models import (
     ApplicationCreate,
     ShortlistRequest,
     OfferCreate,
+    MarkPlaced,
     AnalyticsResponse,
+    TrainingResourceCreate,
+    StudentReviewCreate,
+    InterviewExperienceCreate,
 )
 from resume_parser import upload_and_parse_resume
 from shortlisting import run_shortlisting
 from skill_analyzer import analyze_skill_gap, get_all_training_resources
-from email_service import send_shortlist_email
+from email_service import send_shortlist_email, send_selection_email
 from excel_export import generate_shortlisted_excel
 
 # ── Create FastAPI App ───────────────────────────────────────
 app = FastAPI(
     title="CampusHireAI",
     description="University Hiring & Training Platform API",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 # ── CORS Middleware ──────────────────────────────────────────
 # Allow the React frontend (running on port 5173) to call the API.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,24 +69,26 @@ app.add_middleware(
 @app.post("/api/signup", tags=["Auth"])
 async def signup(user: UserSignup):
     """
-    Register a new student or admin account.
-    - Hashes the password with bcrypt
-    - Inserts into users table
-    - Returns a JWT token
+    Register a new STUDENT account only.
+    Admin accounts cannot be created via signup — they must be
+    added directly in the database.
     """
-    # Hash the password before storing
+    # Force role to student — admin signup is disabled
+    forced_role = "student"
+
     hashed_pw = hash_password(user.password)
 
-    # Insert into Supabase
     try:
         resp = supabase.table("users").insert({
             "roll_no": user.roll_no,
             "name": user.name,
             "email": user.email,
             "password": hashed_pw,
-            "role": user.role,
+            "role": forced_role,
             "branch": user.branch,
             "cgpa": user.cgpa,
+            "cgpa_10th": user.cgpa_10th,
+            "percentage_12th": user.percentage_12th,
         }).execute()
     except Exception as e:
         raise HTTPException(
@@ -90,7 +98,6 @@ async def signup(user: UserSignup):
 
     new_user = resp.data[0]
 
-    # Create JWT token
     token = create_token({
         "sub": new_user["id"],
         "email": new_user["email"],
@@ -110,11 +117,7 @@ async def signup(user: UserSignup):
 async def login(credentials: UserLogin):
     """
     Authenticate a user with email and password.
-    - Fetches user by email
-    - Verifies bcrypt hash
-    - Returns a JWT token
     """
-    # Look up user by email
     resp = (
         supabase.table("users")
         .select("*")
@@ -130,14 +133,12 @@ async def login(credentials: UserLogin):
 
     user = resp.data[0]
 
-    # Verify password
     if not verify_password(credentials.password, user["password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    # Create JWT token
     token = create_token({
         "sub": user["id"],
         "email": user["email"],
@@ -155,15 +156,12 @@ async def login(credentials: UserLogin):
 
 @app.get("/api/me", tags=["Auth"])
 async def get_profile(current_user: dict = Depends(get_current_user)):
-    """
-    Get the current user's profile.
-    Requires a valid JWT token in the Authorization header.
-    """
+    """Get the current user's profile."""
     user_id = current_user["sub"]
 
     resp = (
         supabase.table("users")
-        .select("id, roll_no, name, email, role, branch, cgpa, created_at")
+        .select("id, roll_no, name, email, role, branch, cgpa, cgpa_10th, percentage_12th, created_at")
         .eq("id", user_id)
         .single()
         .execute()
@@ -181,16 +179,14 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
 
 @app.post("/api/drives", tags=["Drives"])
 async def create_drive(drive: DriveCreate, admin: dict = Depends(require_admin)):
-    """
-    Create a new placement drive.
-    Admin-only endpoint.
-    """
+    """Create a new placement drive. Admin-only."""
     resp = supabase.table("drives").insert({
         "company_name": drive.company_name,
         "role": drive.role,
         "eligibility_cgpa": drive.eligibility_cgpa,
         "required_skills": drive.required_skills,
         "deadline": drive.deadline,
+        "package": drive.package or 0,
     }).execute()
 
     return {"message": "Drive created successfully", "drive": resp.data[0]}
@@ -198,10 +194,7 @@ async def create_drive(drive: DriveCreate, admin: dict = Depends(require_admin))
 
 @app.get("/api/drives", tags=["Drives"])
 async def list_drives(current_user: dict = Depends(get_current_user)):
-    """
-    List all placement drives.
-    Available to both students and admins.
-    """
+    """List all placement drives."""
     resp = (
         supabase.table("drives")
         .select("*")
@@ -228,6 +221,49 @@ async def get_drive(drive_id: int, current_user: dict = Depends(get_current_user
     return resp.data
 
 
+# ── JD Upload ────────────────────────────────────────────────
+
+@app.post("/api/drives/{drive_id}/jd", tags=["Drives"])
+async def upload_jd(
+    drive_id: int,
+    file: UploadFile = File(...),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Upload a Job Description (PDF or DOCX) for a drive.
+    Stores the file in Supabase Storage and updates the drive's jd_url.
+    Admin-only.
+    """
+    filename_lower = file.filename.lower()
+    if not (filename_lower.endswith(".pdf") or filename_lower.endswith(".docx")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF or DOCX files are allowed",
+        )
+
+    file_bytes = await file.read()
+    ext = filename_lower.rsplit(".", 1)[-1]
+    storage_name = f"jd_{drive_id}_{uuid_lib.uuid4().hex[:8]}.{ext}"
+
+    # Upload to 'jds' bucket
+    try:
+        supabase.storage.from_("jds").upload(storage_name, file_bytes)
+    except Exception:
+        # If file exists, remove and re-upload
+        try:
+            supabase.storage.from_("jds").remove([storage_name])
+            supabase.storage.from_("jds").upload(storage_name, file_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"JD upload failed: {str(e)}")
+
+    jd_url = supabase.storage.from_("jds").get_public_url(storage_name)
+
+    # Update drive record
+    supabase.table("drives").update({"jd_url": jd_url}).eq("id", drive_id).execute()
+
+    return {"message": "JD uploaded successfully", "jd_url": jd_url}
+
+
 # ═════════════════════════════════════════════════════════════
 #  APPLICATION ROUTES
 # ═════════════════════════════════════════════════════════════
@@ -237,10 +273,7 @@ async def apply_to_drive(
     application: ApplicationCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    Apply to a placement drive as a student.
-    Checks if already applied to prevent duplicates.
-    """
+    """Apply to a placement drive as a student."""
     student_id = current_user["sub"]
 
     # Check for duplicate application
@@ -258,23 +291,24 @@ async def apply_to_drive(
             detail="You have already applied to this drive",
         )
 
-    # Create application
-    resp = supabase.table("applications").insert({
+    # Create application with optional resume_id
+    insert_data = {
         "student_id": student_id,
         "drive_id": application.drive_id,
         "status": "Applied",
         "ai_score": 0.0,
-    }).execute()
+    }
+    if hasattr(application, 'resume_id') and application.resume_id:
+        insert_data["resume_id"] = application.resume_id
+
+    resp = supabase.table("applications").insert(insert_data).execute()
 
     return {"message": "Application submitted successfully", "application": resp.data[0]}
 
 
 @app.get("/api/applications/my", tags=["Applications"])
 async def my_applications(current_user: dict = Depends(get_current_user)):
-    """
-    Get all applications for the current student.
-    Includes drive details for display.
-    """
+    """Get all applications for the current student."""
     student_id = current_user["sub"]
 
     resp = (
@@ -293,10 +327,7 @@ async def get_drive_applications(
     drive_id: int,
     admin: dict = Depends(require_admin),
 ):
-    """
-    Get all applications for a specific drive.
-    Admin-only — used on the Shortlist Results page.
-    """
+    """Get all applications for a specific drive. Admin-only."""
     resp = (
         supabase.table("applications")
         .select("*, users(roll_no, name, email, branch, cgpa)")
@@ -315,16 +346,10 @@ async def get_drive_applications(
 @app.post("/api/resume/upload", tags=["Resume"])
 async def upload_resume(
     file: UploadFile = File(...),
+    label: str = "Resume",
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    Upload a resume PDF.
-    - Stores the file in Supabase Storage
-    - Extracts text using pdfplumber
-    - Extracts skills using spaCy + keyword matching
-    - Saves extracted data to resume_metadata table
-    """
-    # Validate file type
+    """Upload a resume PDF, extract skills and projects. Supports multiple resumes."""
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -334,8 +359,7 @@ async def upload_resume(
     student_id = current_user["sub"]
     file_bytes = await file.read()
 
-    # Run the full parsing pipeline
-    result = await upload_and_parse_resume(file_bytes, file.filename, student_id)
+    result = await upload_and_parse_resume(file_bytes, file.filename, student_id, label)
 
     return {
         "message": "Resume uploaded and parsed successfully",
@@ -344,21 +368,30 @@ async def upload_resume(
 
 
 @app.get("/api/resume/my", tags=["Resume"])
-async def get_my_resume(current_user: dict = Depends(get_current_user)):
-    """Get the current student's resume metadata."""
+async def get_my_resumes(current_user: dict = Depends(get_current_user)):
+    """Get all resumes for the current student."""
     student_id = current_user["sub"]
 
     resp = (
         supabase.table("resume_metadata")
         .select("*")
         .eq("student_id", student_id)
+        .order("uploaded_at", desc=True)
         .execute()
     )
 
-    if not resp.data:
-        return {"message": "No resume uploaded yet"}
+    return resp.data or []
 
-    return resp.data[0]
+
+@app.delete("/api/resume/{resume_id}", tags=["Resume"])
+async def delete_resume(
+    resume_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a specific resume."""
+    student_id = current_user["sub"]
+    supabase.table("resume_metadata").delete().eq("id", resume_id).eq("student_id", student_id).execute()
+    return {"message": "Resume deleted"}
 
 
 # ═════════════════════════════════════════════════════════════
@@ -372,14 +405,15 @@ async def shortlist_students(
 ):
     """
     Run the AI shortlisting algorithm for a drive.
-    Admin-only endpoint.
-
-    Algorithm:
-      - Filters by CGPA eligibility
-      - Calculates: 0.6 * skill_score + 0.4 * (cgpa/10)
-      - Shortlists students above the threshold
+    Supports optional top_n and 1.7× offer filter.
+    Admin-only.
     """
-    result = run_shortlisting(request.drive_id, request.threshold)
+    result = run_shortlisting(
+        drive_id=request.drive_id,
+        threshold=request.threshold,
+        top_n=request.top_n,
+        apply_offer_filter=request.apply_offer_filter,
+    )
 
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
@@ -401,10 +435,7 @@ async def get_shortlist_results(
     drive_id: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get shortlisting results for a drive.
-    Returns all applications with their status and AI score.
-    """
+    """Get shortlisting results for a drive."""
     resp = (
         supabase.table("applications")
         .select("*, users(roll_no, name, email, branch, cgpa)")
@@ -416,6 +447,99 @@ async def get_shortlist_results(
     return resp.data
 
 
+@app.put("/api/applications/{application_id}/place", tags=["Shortlisting"])
+async def mark_placed(
+    application_id: int,
+    body: MarkPlaced,
+    admin: dict = Depends(require_admin),
+):
+    """Mark a shortlisted student as Placed. Admin-only."""
+    app_resp = (
+        supabase.table("applications")
+        .select("*, users(id, name, email), drives(company_name)")
+        .eq("id", application_id)
+        .single()
+        .execute()
+    )
+
+    if not app_resp.data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    app_data = app_resp.data
+    student = app_data.get("users", {})
+    drive = app_data.get("drives", {})
+
+    supabase.table("applications").update({
+        "status": "Placed",
+    }).eq("id", application_id).execute()
+
+    supabase.table("offers").insert({
+        "student_id": student.get("id"),
+        "company": drive.get("company_name", ""),
+        "package": body.package,
+        "offer_date": body.offer_date,
+    }).execute()
+
+    if student.get("email"):
+        send_selection_email(
+            to_email=student["email"],
+            student_name=student.get("name", "Student"),
+            company_name=drive.get("company_name", ""),
+            package=body.package,
+        )
+
+    return {
+        "message": f"{student.get('name', 'Student')} marked as Placed",
+        "application_id": application_id,
+    }
+
+
+@app.post("/api/shortlist/{drive_id}/notify", tags=["Shortlisting"])
+async def send_shortlist_notifications(
+    drive_id: int,
+    admin: dict = Depends(require_admin),
+):
+    """Send shortlist notification emails to all shortlisted students. Admin-only."""
+    drive_resp = (
+        supabase.table("drives")
+        .select("company_name")
+        .eq("id", drive_id)
+        .single()
+        .execute()
+    )
+
+    if not drive_resp.data:
+        raise HTTPException(status_code=404, detail="Drive not found")
+
+    company = drive_resp.data["company_name"]
+
+    apps_resp = (
+        supabase.table("applications")
+        .select("*, users(name, email)")
+        .eq("drive_id", drive_id)
+        .eq("status", "Shortlisted")
+        .execute()
+    )
+
+    sent_count = 0
+    for app in (apps_resp.data or []):
+        student = app.get("users", {})
+        if student.get("email"):
+            success = send_shortlist_email(
+                to_email=student["email"],
+                student_name=student.get("name", "Student"),
+                company_name=company,
+            )
+            if success:
+                sent_count += 1
+
+    return {
+        "message": f"Sent {sent_count} shortlist notification emails",
+        "emails_sent": sent_count,
+        "total_shortlisted": len(apps_resp.data or []),
+    }
+
+
 # ═════════════════════════════════════════════════════════════
 #  SKILL GAP & TRAINING ROUTES
 # ═════════════════════════════════════════════════════════════
@@ -425,10 +549,7 @@ async def skill_gap(
     drive_id: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get skill-gap analysis for the current student vs a drive.
-    Shows matched skills, missing skills, and training resources.
-    """
+    """Get skill-gap analysis for the current student vs a drive."""
     student_id = current_user["sub"]
     result = analyze_skill_gap(student_id, drive_id)
 
@@ -438,10 +559,221 @@ async def skill_gap(
     return result
 
 
-@app.get("/api/training", tags=["Skill Analysis"])
+@app.get("/api/training", tags=["Training"])
 async def list_training_resources(current_user: dict = Depends(get_current_user)):
     """Get all available training resources."""
     return get_all_training_resources()
+
+
+@app.post("/api/training", tags=["Training"])
+async def create_training_resource(
+    resource: TrainingResourceCreate,
+    admin: dict = Depends(require_admin),
+):
+    """Add a new training resource (video, blog, course, etc.). Admin-only."""
+    resp = supabase.table("training_resources").insert({
+        "skill": resource.skill,
+        "title": resource.title,
+        "link": resource.link,
+        "type": resource.type,
+    }).execute()
+
+    return {"message": "Training resource added", "resource": resp.data[0]}
+
+
+@app.put("/api/training/{resource_id}", tags=["Training"])
+async def update_training_resource(
+    resource_id: int,
+    resource: TrainingResourceCreate,
+    admin: dict = Depends(require_admin),
+):
+    """Update a training resource. Admin-only."""
+    resp = supabase.table("training_resources").update({
+        "skill": resource.skill,
+        "title": resource.title,
+        "link": resource.link,
+        "type": resource.type,
+    }).eq("id", resource_id).execute()
+
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+    return {"message": "Resource updated", "resource": resp.data[0]}
+
+
+@app.delete("/api/training/{resource_id}", tags=["Training"])
+async def delete_training_resource(
+    resource_id: int,
+    admin: dict = Depends(require_admin),
+):
+    """Delete a training resource. Admin-only."""
+    supabase.table("training_resources").delete().eq("id", resource_id).execute()
+    return {"message": "Resource deleted"}
+
+
+# ═════════════════════════════════════════════════════════════
+#  INTERVIEW EXPERIENCES ROUTES
+# ═════════════════════════════════════════════════════════════
+
+@app.post("/api/experiences", tags=["Experiences"])
+async def create_experience(
+    exp: InterviewExperienceCreate,
+    admin: dict = Depends(require_admin),
+):
+    """Add interview experience / prep tips for a drive. Admin-only."""
+    admin_id = admin["sub"]
+
+    resp = supabase.table("interview_experiences").insert({
+        "drive_id": exp.drive_id,
+        "title": exp.title,
+        "content": exp.content,
+        "tips": exp.tips,
+        "added_by": admin_id,
+    }).execute()
+
+    return {"message": "Experience added", "experience": resp.data[0]}
+
+
+@app.get("/api/experiences", tags=["Experiences"])
+async def list_all_experiences(current_user: dict = Depends(get_current_user)):
+    """Get all interview experiences (all drives)."""
+    resp = (
+        supabase.table("interview_experiences")
+        .select("*, drives(company_name, role)")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data
+
+
+@app.get("/api/experiences/{drive_id}", tags=["Experiences"])
+async def get_drive_experiences(
+    drive_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get interview experiences for a specific drive."""
+    resp = (
+        supabase.table("interview_experiences")
+        .select("*, drives(company_name, role)")
+        .eq("drive_id", drive_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data
+
+
+@app.delete("/api/experiences/{experience_id}", tags=["Experiences"])
+async def delete_experience(
+    experience_id: int,
+    admin: dict = Depends(require_admin),
+):
+    """Delete an interview experience. Admin-only."""
+    supabase.table("interview_experiences").delete().eq("id", experience_id).execute()
+    return {"message": "Experience deleted"}
+
+
+# ═════════════════════════════════════════════════════════════
+#  STUDENT REVIEWS ROUTES
+# ═════════════════════════════════════════════════════════════
+
+@app.post("/api/reviews", tags=["Reviews"])
+async def create_review(
+    review: StudentReviewCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Submit a review for a company. Only placed students may review.
+    """
+    student_id = current_user["sub"]
+
+    # Verify student has been placed (has an offer or Placed status)
+    offers_resp = (
+        supabase.table("offers")
+        .select("id")
+        .eq("student_id", student_id)
+        .execute()
+    )
+    if not offers_resp.data:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only placed students can write reviews",
+        )
+
+    resp = supabase.table("student_reviews").insert({
+        "student_id": student_id,
+        "drive_id": review.drive_id,
+        "company": review.company,
+        "rating": review.rating,
+        "content": review.content,
+    }).execute()
+
+    return {"message": "Review submitted", "review": resp.data[0]}
+
+
+@app.get("/api/reviews", tags=["Reviews"])
+async def list_all_reviews(current_user: dict = Depends(get_current_user)):
+    """Get all student reviews."""
+    resp = (
+        supabase.table("student_reviews")
+        .select("*, users(name, branch), drives(company_name, role)")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data
+
+
+@app.get("/api/reviews/company/{company_name}", tags=["Reviews"])
+async def get_company_reviews(
+    company_name: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get reviews for a specific company."""
+    resp = (
+        supabase.table("student_reviews")
+        .select("*, users(name, branch)")
+        .ilike("company", f"%{company_name}%")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data
+
+
+@app.get("/api/reviews/drive/{drive_id}", tags=["Reviews"])
+async def get_drive_reviews(
+    drive_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get reviews linked to a specific drive."""
+    resp = (
+        supabase.table("student_reviews")
+        .select("*, users(name, branch)")
+        .eq("drive_id", drive_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data
+
+
+@app.delete("/api/reviews/{review_id}", tags=["Reviews"])
+async def delete_review(
+    review_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a review (own review or admin)."""
+    # Check ownership or admin
+    if current_user.get("role") != "admin":
+        review_resp = (
+            supabase.table("student_reviews")
+            .select("student_id")
+            .eq("id", review_id)
+            .single()
+            .execute()
+        )
+        if review_resp.data and review_resp.data["student_id"] != current_user["sub"]:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    supabase.table("student_reviews").delete().eq("id", review_id).execute()
+    return {"message": "Review deleted"}
 
 
 # ═════════════════════════════════════════════════════════════
@@ -453,11 +785,7 @@ async def export_shortlisted(
     drive_id: int,
     admin: dict = Depends(require_admin),
 ):
-    """
-    Export shortlisted students for a drive as an Excel file.
-    Admin-only endpoint.
-    Returns a downloadable .xlsx file.
-    """
+    """Export shortlisted students as Excel. Admin-only."""
     excel_bytes = generate_shortlisted_excel(drive_id)
 
     if not excel_bytes:
@@ -466,7 +794,6 @@ async def export_shortlisted(
             detail="No shortlisted students found for this drive",
         )
 
-    # Return as downloadable file
     return StreamingResponse(
         io.BytesIO(excel_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -493,7 +820,6 @@ async def create_offer(
         "offer_date": offer.offer_date,
     }).execute()
 
-    # Update application status to "Offered" if applicable
     supabase.table("applications").update({
         "status": "Offered",
     }).eq("student_id", offer.student_id).execute()
@@ -522,11 +848,8 @@ async def my_offers(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/analytics", tags=["Analytics"])
 async def get_analytics(admin: dict = Depends(require_admin)):
-    """
-    Get analytics data for the admin dashboard.
-    Returns totals, placement rate, branch stats, and skill distribution.
-    """
-    # Total students
+    """Get analytics data for the admin dashboard."""
+
     students_resp = (
         supabase.table("users")
         .select("id, branch", count="exact")
@@ -535,7 +858,6 @@ async def get_analytics(admin: dict = Depends(require_admin)):
     )
     total_students = students_resp.count or 0
 
-    # Total drives
     drives_resp = (
         supabase.table("drives")
         .select("id", count="exact")
@@ -543,7 +865,6 @@ async def get_analytics(admin: dict = Depends(require_admin)):
     )
     total_drives = drives_resp.count or 0
 
-    # Shortlisted count
     shortlisted_resp = (
         supabase.table("applications")
         .select("id", count="exact")
@@ -552,7 +873,6 @@ async def get_analytics(admin: dict = Depends(require_admin)):
     )
     total_shortlisted = shortlisted_resp.count or 0
 
-    # Offers count
     offers_resp = (
         supabase.table("offers")
         .select("id, student_id", count="exact")
@@ -560,20 +880,16 @@ async def get_analytics(admin: dict = Depends(require_admin)):
     )
     total_offers = offers_resp.count or 0
 
-    # Placement rate = (students with offers / total students) * 100
     placement_rate = 0.0
     if total_students > 0:
-        # Get unique students with offers
         unique_placed = len(set(o["student_id"] for o in (offers_resp.data or [])))
         placement_rate = round((unique_placed / total_students) * 100, 2)
 
-    # Branch-wise student distribution
     branch_stats = {}
     for s in (students_resp.data or []):
         branch = s.get("branch", "Unknown") or "Unknown"
         branch_stats[branch] = branch_stats.get(branch, 0) + 1
 
-    # Skill distribution — aggregate from all resume_metadata
     skill_dist = {}
     resumes_resp = (
         supabase.table("resume_metadata")
@@ -584,6 +900,48 @@ async def get_analytics(admin: dict = Depends(require_admin)):
         for skill in (r.get("extracted_skills") or []):
             skill_dist[skill] = skill_dist.get(skill, 0) + 1
 
+    # ── Year-wise stats ──
+    # Drives per year
+    all_drives = (
+        supabase.table("drives")
+        .select("id, created_at")
+        .execute()
+    ).data or []
+
+    # Offers per year
+    all_offers = (
+        supabase.table("offers")
+        .select("id, student_id, offer_date")
+        .execute()
+    ).data or []
+
+    # Placed applications per year
+    placed_apps = (
+        supabase.table("applications")
+        .select("id, applied_at")
+        .eq("status", "Placed")
+        .execute()
+    ).data or []
+
+    year_wise_stats = {}
+    for d in all_drives:
+        year = str(d.get("created_at", "")[:4]) if d.get("created_at") else "Unknown"
+        if year not in year_wise_stats:
+            year_wise_stats[year] = {"drives": 0, "offers": 0, "placed": 0}
+        year_wise_stats[year]["drives"] += 1
+
+    for o in all_offers:
+        year = str(o.get("offer_date", "")[:4]) if o.get("offer_date") else "Unknown"
+        if year not in year_wise_stats:
+            year_wise_stats[year] = {"drives": 0, "offers": 0, "placed": 0}
+        year_wise_stats[year]["offers"] += 1
+
+    for a in placed_apps:
+        year = str(a.get("applied_at", "")[:4]) if a.get("applied_at") else "Unknown"
+        if year not in year_wise_stats:
+            year_wise_stats[year] = {"drives": 0, "offers": 0, "placed": 0}
+        year_wise_stats[year]["placed"] += 1
+
     return AnalyticsResponse(
         total_students=total_students,
         total_drives=total_drives,
@@ -592,6 +950,7 @@ async def get_analytics(admin: dict = Depends(require_admin)):
         placement_rate=placement_rate,
         branch_stats=branch_stats,
         skill_distribution=skill_dist,
+        year_wise_stats=dict(sorted(year_wise_stats.items())),
     )
 
 
@@ -605,5 +964,5 @@ async def root():
     return {
         "status": "running",
         "app": "CampusHireAI",
-        "version": "1.0.0",
+        "version": "2.0.0",
     }

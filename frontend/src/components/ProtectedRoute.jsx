@@ -1,23 +1,23 @@
 // ============================================================
-// ProtectedRoute.jsx — Auth Guard for Routes
-//
-// Wraps routes that require authentication.
-// Redirects to /login if no valid token is present.
+// ProtectedRoute.jsx — Auth Guard with DashboardLayout
 // ============================================================
 
 import { Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import DashboardLayout from './DashboardLayout'
 
 function ProtectedRoute() {
     const { isAuthenticated } = useAuth()
 
-    // If not authenticated, redirect to login page
     if (!isAuthenticated) {
         return <Navigate to="/login" replace />
     }
 
-    // Render the child route
-    return <Outlet />
+    return (
+        <DashboardLayout>
+            <Outlet />
+        </DashboardLayout>
+    )
 }
 
 export default ProtectedRoute
