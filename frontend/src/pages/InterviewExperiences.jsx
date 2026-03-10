@@ -1,6 +1,6 @@
 // ============================================================
 // InterviewExperiences.jsx — View/Add Interview Experiences
-// Admin: add/delete. Students: view.
+// Admin: add/delete. Students: view + search.
 // ============================================================
 
 import { useState, useEffect } from 'react'
@@ -19,6 +19,7 @@ function InterviewExperiences() {
     const [saving, setSaving] = useState(false)
     const [showForm, setShowForm] = useState(false)
     const [error, setError] = useState('')
+    const [searchQuery, setSearchQuery] = useState('')
 
     useEffect(() => {
         fetchExperiences()
@@ -61,6 +62,19 @@ function InterviewExperiences() {
         catch { alert('Delete failed') }
     }
 
+    // Filter experiences by search query
+    const filtered = experiences.filter((exp) => {
+        const q = searchQuery.toLowerCase()
+        if (!q) return true
+        return (
+            exp.title?.toLowerCase().includes(q) ||
+            exp.content?.toLowerCase().includes(q) ||
+            exp.tips?.toLowerCase().includes(q) ||
+            exp.drives?.company_name?.toLowerCase().includes(q) ||
+            exp.drives?.role?.toLowerCase().includes(q)
+        )
+    })
+
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
@@ -71,9 +85,10 @@ function InterviewExperiences() {
 
     return (
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 animate-fade-in">
-            <div className="flex items-center justify-between mb-8">
+            {/* ── Header ─────────────────────────────────────────────── */}
+            <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl text-heading">💡 Interview Experiences & Prep</h1>
+                    <h1 className="text-2xl text-heading">💡 Interview Experiences &amp; Prep</h1>
                     <p className="text-sub mt-1">
                         {driveId ? 'Experiences for this drive' : 'Previous year questions, experiences & admin tips'}
                     </p>
@@ -85,7 +100,40 @@ function InterviewExperiences() {
                 )}
             </div>
 
-            {/* Admin Add Form */}
+            {/* ── Search Bar ─────────────────────────────────────────── */}
+            <div className="mb-6">
+                <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sub pointer-events-none">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+                        </svg>
+                    </span>
+                    <input
+                        type="text"
+                        className="input pl-10 text-sm"
+                        placeholder="Search by title, company, keyword, or tip…"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                    {searchQuery && (
+                        <button
+                            onClick={() => setSearchQuery('')}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-sub hover:text-heading transition-colors"
+                        >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    )}
+                </div>
+                {searchQuery && (
+                    <p className="text-sub text-xs mt-1.5 ml-1">
+                        {filtered.length} result{filtered.length !== 1 ? 's' : ''} for &quot;{searchQuery}&quot;
+                    </p>
+                )}
+            </div>
+
+            {/* ── Admin Add Form ──────────────────────────────────────── */}
             {showForm && isAdmin && (
                 <div className="card mb-8 animate-slide-up">
                     <h2 className="text-lg font-semibold text-heading mb-4">Add Interview Experience / Tips</h2>
@@ -131,10 +179,10 @@ function InterviewExperiences() {
                 </div>
             )}
 
-            {/* Experience List */}
-            {experiences.length > 0 ? (
+            {/* ── Experience List ─────────────────────────────────────── */}
+            {filtered.length > 0 ? (
                 <div className="space-y-4 stagger">
-                    {experiences.map((exp) => (
+                    {filtered.map((exp) => (
                         <div key={exp.id} className="card animate-fade-in">
                             <div className="flex items-start justify-between">
                                 <div className="flex-1">
@@ -180,9 +228,11 @@ function InterviewExperiences() {
                 </div>
             ) : (
                 <div className="card text-center py-12">
-                    <p className="text-4xl mb-3">📭</p>
-                    <p className="text-sub text-lg">No interview experiences shared yet</p>
-                    {isAdmin && <p className="text-sub text-sm mt-2">Click "Add Experience" to share insights with students.</p>}
+                    <p className="text-4xl mb-3">{searchQuery ? '🔍' : '📭'}</p>
+                    <p className="text-sub text-lg">
+                        {searchQuery ? `No experience found for "${searchQuery}"` : 'No interview experiences shared yet'}
+                    </p>
+                    {!searchQuery && isAdmin && <p className="text-sub text-sm mt-2">Click "Add Experience" to share insights with students.</p>}
                 </div>
             )}
         </div>

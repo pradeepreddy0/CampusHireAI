@@ -21,6 +21,10 @@ import TrainingRecommendations from './pages/TrainingRecommendations'
 import AdminTrainingManager from './pages/AdminTrainingManager'
 import InterviewExperiences from './pages/InterviewExperiences'
 import StudentReviews from './pages/StudentReviews'
+import DriveHistory from './pages/DriveHistory'
+import OffersPage from './pages/OffersPage'
+import DriveWorkflow from './pages/DriveWorkflow'
+import ProfilePage from './pages/ProfilePage'
 
 // Wrap page in transition
 const P = ({ children }) => <PageTransition>{children}</PageTransition>
@@ -53,10 +57,14 @@ function App() {
                 <Route path="/admin/shortlist/:driveId" element={<P><ShortlistResults /></P>} />
                 <Route path="/admin/training" element={<P><AdminTrainingManager /></P>} />
                 <Route path="/admin/experiences" element={<P><InterviewExperiences /></P>} />
+                <Route path="/admin/drive-history" element={<P><DriveHistory /></P>} />
+                <Route path="/admin/offers" element={<P><OffersPage /></P>} />
+                <Route path="/admin/drives/:driveId/workflow" element={<P><DriveWorkflow /></P>} />
 
                 {/* Shared */}
                 <Route path="/shortlist/:driveId" element={<P><ShortlistResults /></P>} />
                 <Route path="/reviews" element={<P><StudentReviews /></P>} />
+                <Route path="/profile" element={<P><ProfilePage /></P>} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" />} />

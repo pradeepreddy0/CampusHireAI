@@ -22,3 +22,8 @@ spacy==3.7.2
 # Data export
 pandas==2.1.4
 openpyxl==3.1.2
+
+# AI / ML features
+scikit-learn==1.4.0
+numpy==1.26.3
+textblob==0.18.0

@@ -40,9 +40,29 @@ from models import (
 )
 from resume_parser import upload_and_parse_resume
 from shortlisting import run_shortlisting
-from skill_analyzer import analyze_skill_gap, get_all_training_resources
-from email_service import send_shortlist_email, send_selection_email
+from skill_analyzer import analyze_skill_gap, analyze_skill_gap_for_role, get_all_training_resources
+from email_service import send_shortlist_email, send_selection_email, send_stage_email
 from excel_export import generate_shortlisted_excel
+
+# ── AI Feature Modules ───────────────────────────────────────
+from ai_resume_analyzer import analyze_resume_by_id, compute_resume_score
+from job_matcher import get_match_for_student_drive, get_match_all_drives
+from placement_predictor import predict_placement, batch_predict
+from smart_recommender import (
+    recommend_drives,
+    recommend_training,
+    recommend_experiences,
+    get_all_recommendations,
+)
+from analytics_engine import (
+    get_placement_trends,
+    get_branch_placement_rates,
+    get_skill_demand,
+    get_recruiter_activity,
+    get_application_funnel,
+    get_package_distribution,
+    get_ai_overview,
+)
 
 # ── Create FastAPI App ───────────────────────────────────────
 app = FastAPI(
@@ -171,6 +191,35 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="User not found")
 
     return resp.data
+
+
+@app.put("/api/me", tags=["Auth"])
+async def update_profile(
+    body: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update the current user's profile (name, branch, CGPA, roll_no, phone)."""
+    user_id = current_user["sub"]
+
+    allowed = {}
+    for field in ("name", "branch", "cgpa", "roll_no", "phone", "cgpa_10th", "percentage_12th"):
+        if field in body and body[field] is not None:
+            allowed[field] = body[field]
+
+    if not allowed:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    resp = (
+        supabase.table("users")
+        .update(allowed)
+        .eq("id", user_id)
+        .execute()
+    )
+
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {"message": "Profile updated", "user": resp.data[0]}
 
 
 # ═════════════════════════════════════════════════════════════
@@ -543,6 +592,19 @@ async def send_shortlist_notifications(
 # ═════════════════════════════════════════════════════════════
 #  SKILL GAP & TRAINING ROUTES
 # ═════════════════════════════════════════════════════════════
+
+@app.get("/api/skill-gap/role/{role_name}", tags=["Skill Analysis"])
+async def skill_gap_for_role(
+    role_name: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get skill-gap analysis for the current student vs a named role (e.g. 'Backend Developer')."""
+    student_id = current_user["sub"]
+    result = analyze_skill_gap_for_role(student_id, role_name)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
 
 @app.get("/api/skill-gap/{drive_id}", tags=["Skill Analysis"])
 async def skill_gap(
@@ -952,6 +1014,594 @@ async def get_analytics(admin: dict = Depends(require_admin)):
         skill_distribution=skill_dist,
         year_wise_stats=dict(sorted(year_wise_stats.items())),
     )
+
+
+# ═════════════════════════════════════════════════════════════
+#  DRIVE HISTORY ROUTE
+# ═════════════════════════════════════════════════════════════
+
+@app.get("/api/drives/history", tags=["Drives"])
+async def get_drive_history(admin: dict = Depends(require_admin)):
+    """
+    Get all drives with per-drive stats:
+    applied, shortlisted, offered, placed counts.
+    Drives are tagged as Upcoming / Ongoing / Closed by deadline.
+    Admin-only.
+    """
+    from datetime import datetime, timezone
+
+    drives_resp = (
+        supabase.table("drives")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    drives = drives_resp.data or []
+
+    # Fetch all application status counts in one query
+    apps_resp = (
+        supabase.table("applications")
+        .select("drive_id, status")
+        .execute()
+    )
+    apps = apps_resp.data or []
+
+    # Group counts per drive
+    from collections import defaultdict
+    counts = defaultdict(lambda: {"applied": 0, "shortlisted": 0, "offered": 0, "placed": 0})
+    for a in apps:
+        did = a["drive_id"]
+        s = (a.get("status") or "").lower()
+        if s == "applied":
+            counts[did]["applied"] += 1
+        elif s == "shortlisted":
+            counts[did]["shortlisted"] += 1
+        elif s == "offered":
+            counts[did]["offered"] += 1
+        elif s == "placed":
+            counts[did]["placed"] += 1
+
+    now = datetime.now(timezone.utc)
+    history = []
+    for d in drives:
+        deadline_str = d.get("deadline")
+        if deadline_str:
+            try:
+                dl = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+                if dl > now:
+                    drive_status = "Upcoming"
+                else:
+                    drive_status = "Closed"
+            except Exception:
+                drive_status = "Unknown"
+        else:
+            drive_status = "Ongoing"
+
+        c = counts[d["id"]]
+        history.append({
+            "id": d["id"],
+            "company_name": d["company_name"],
+            "role": d["role"],
+            "deadline": d.get("deadline"),
+            "package": d.get("package"),
+            "eligibility_cgpa": d.get("eligibility_cgpa"),
+            "required_skills": d.get("required_skills", []),
+            "status": drive_status,
+            "applied": c["applied"],
+            "shortlisted": c["shortlisted"],
+            "offered": c["offered"],
+            "placed": c["placed"],
+            "created_at": d.get("created_at"),
+        })
+
+    return history
+
+
+# ═════════════════════════════════════════════════════════════
+#  ALL OFFERS ROUTE (with filters)
+# ═════════════════════════════════════════════════════════════
+
+@app.get("/api/offers/all", tags=["Offers"])
+async def get_all_offers(
+    company: str = None,
+    branch: str = None,
+    min_package: float = None,
+    max_package: float = None,
+    from_date: str = None,
+    to_date: str = None,
+    admin: dict = Depends(require_admin),
+):
+    """
+    Get all placement offers with student info.
+    Supports filtering by company name, branch/department, package range, and date range.
+    Admin-only.
+    """
+    query = (
+        supabase.table("offers")
+        .select("*, users(name, roll_no, email, branch, cgpa)")
+        .order("offer_date", desc=True)
+    )
+
+    resp = query.execute()
+    offers = resp.data or []
+
+    # Apply filters in Python (Supabase free tier has limited query operators)
+    if company:
+        offers = [o for o in offers if company.lower() in (o.get("company") or "").lower()]
+    if branch:
+        offers = [o for o in offers if branch.lower() in ((o.get("users") or {}).get("branch") or "").lower()]
+    if min_package is not None:
+        offers = [o for o in offers if (o.get("package") or 0) >= min_package]
+    if max_package is not None:
+        offers = [o for o in offers if (o.get("package") or 0) <= max_package]
+    if from_date:
+        offers = [o for o in offers if (o.get("offer_date") or "") >= from_date]
+    if to_date:
+        offers = [o for o in offers if (o.get("offer_date") or "") <= to_date]
+
+    return offers
+
+
+# ═════════════════════════════════════════════════════════════
+#  DRIVE STAGES ROUTES
+# ═════════════════════════════════════════════════════════════
+
+DEFAULT_STAGES = ["Shortlisted", "Exam", "Interview", "Offered"]
+
+
+@app.get("/api/drives/{drive_id}/stages", tags=["Workflow"])
+async def get_drive_stages(
+    drive_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get all workflow stages for a drive, ordered by stage_order."""
+    resp = (
+        supabase.table("drive_stages")
+        .select("*")
+        .eq("drive_id", drive_id)
+        .order("stage_order")
+        .execute()
+    )
+    return resp.data or []
+
+
+@app.post("/api/drives/{drive_id}/stages", tags=["Workflow"])
+async def create_drive_stage(
+    drive_id: int,
+    body: dict,
+    admin: dict = Depends(require_admin),
+):
+    """
+    Add a workflow stage to a drive.
+    Body: { name: str, stage_order: int }
+    If no stages exist yet, calling this with init_defaults=true
+    seeds the 4 default stages first.
+    Admin-only.
+    """
+    # Check if this is a request to seed defaults
+    if body.get("init_defaults"):
+        existing = (
+            supabase.table("drive_stages")
+            .select("id")
+            .eq("drive_id", drive_id)
+            .execute()
+        )
+        if not existing.data:
+            rows = [
+                {"drive_id": drive_id, "name": n, "stage_order": i + 1}
+                for i, n in enumerate(DEFAULT_STAGES)
+            ]
+            supabase.table("drive_stages").insert(rows).execute()
+        return {"message": "Default stages initialised"}
+
+    # Otherwise add a single custom stage
+    name = body.get("name", "").strip()
+    order = body.get("stage_order")
+    if not name or order is None:
+        raise HTTPException(status_code=400, detail="name and stage_order are required")
+
+    resp = supabase.table("drive_stages").insert({
+        "drive_id": drive_id,
+        "name": name,
+        "stage_order": order,
+    }).execute()
+
+    return {"message": "Stage added", "stage": resp.data[0]}
+
+
+@app.delete("/api/drives/{drive_id}/stages/{stage_id}", tags=["Workflow"])
+async def delete_drive_stage(
+    drive_id: int,
+    stage_id: int,
+    admin: dict = Depends(require_admin),
+):
+    """Delete a specific stage from a drive. Admin-only."""
+    supabase.table("drive_stages").delete().eq("id", stage_id).eq("drive_id", drive_id).execute()
+    return {"message": "Stage deleted"}
+
+
+# ═════════════════════════════════════════════════════════════
+#  STAGE PROGRESS ROUTES
+# ═════════════════════════════════════════════════════════════
+
+@app.get("/api/stages/{stage_id}/progress", tags=["Workflow"])
+async def get_stage_progress(
+    stage_id: int,
+    admin: dict = Depends(require_admin),
+):
+    """
+    Get all students and their status for a specific stage.
+    Only includes students who are Shortlisted (or higher) on the drive.
+    Auto-creates Pending records for any shortlisted student not yet tracked.
+    Admin-only.
+    """
+    # Fetch the stage to get drive_id
+    stage_resp = (
+        supabase.table("drive_stages")
+        .select("drive_id, name")
+        .eq("id", stage_id)
+        .single()
+        .execute()
+    )
+    if not stage_resp.data:
+        raise HTTPException(status_code=404, detail="Stage not found")
+
+    drive_id = stage_resp.data["drive_id"]
+
+    # Fetch all shortlisted/offered/placed applications for this drive
+    apps_resp = (
+        supabase.table("applications")
+        .select("id, student_id, status, ai_score, users(name, roll_no, email, branch, cgpa)")
+        .eq("drive_id", drive_id)
+        .in_("status", ["Shortlisted", "Offered", "Placed"])
+        .execute()
+    )
+    applications = apps_resp.data or []
+
+    if not applications:
+        return []
+
+    app_ids = [a["id"] for a in applications]
+
+    # Fetch existing progress records for this stage
+    existing_resp = (
+        supabase.table("stage_progress")
+        .select("*")
+        .eq("stage_id", stage_id)
+        .execute()
+    )
+    existing = {e["application_id"]: e for e in (existing_resp.data or [])}
+
+    # Auto-create Pending records for apps not yet tracked
+    missing = [aid for aid in app_ids if aid not in existing]
+    if missing:
+        new_rows = [{"stage_id": stage_id, "application_id": aid, "status": "Pending"} for aid in missing]
+        new_resp = supabase.table("stage_progress").insert(new_rows).execute()
+        for row in (new_resp.data or []):
+            existing[row["application_id"]] = row
+
+    # Merge app info with progress status
+    result = []
+    for a in applications:
+        prog = existing.get(a["id"], {})
+        student = a.get("users", {})
+        result.append({
+            "progress_id": prog.get("id"),
+            "application_id": a["id"],
+            "student_id": a["student_id"],
+            "name": student.get("name"),
+            "roll_no": student.get("roll_no"),
+            "email": student.get("email"),
+            "branch": student.get("branch"),
+            "cgpa": student.get("cgpa"),
+            "ai_score": a.get("ai_score"),
+            "stage_status": prog.get("status", "Pending"),
+        })
+
+    return result
+
+
+@app.post("/api/stages/{stage_id}/progress", tags=["Workflow"])
+async def update_stage_progress(
+    stage_id: int,
+    body: dict,
+    admin: dict = Depends(require_admin),
+):
+    """
+    Bulk-update student stage statuses and send emails.
+    Body: {
+        updates: [{ application_id: int, status: "Cleared"|"Eliminated" }, ...]
+    }
+    For each update, upserts stage_progress and sends a stage email.
+    Admin-only.
+    """
+    updates = body.get("updates", [])
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    # Fetch stage + drive info for email
+    stage_resp = (
+        supabase.table("drive_stages")
+        .select("name, drive_id")
+        .eq("id", stage_id)
+        .single()
+        .execute()
+    )
+    if not stage_resp.data:
+        raise HTTPException(status_code=404, detail="Stage not found")
+
+    stage_name = stage_resp.data["name"]
+    drive_id = stage_resp.data["drive_id"]
+
+    drive_resp = (
+        supabase.table("drives")
+        .select("company_name")
+        .eq("id", drive_id)
+        .single()
+        .execute()
+    )
+    company_name = drive_resp.data["company_name"] if drive_resp.data else "Company"
+
+    emailed = 0
+    updated = 0
+
+    for u in updates:
+        app_id = u.get("application_id")
+        new_status = u.get("status")
+
+        if not app_id or new_status not in ("Cleared", "Eliminated", "Pending"):
+            continue
+
+        # Upsert stage_progress
+        supabase.table("stage_progress").upsert({
+            "stage_id": stage_id,
+            "application_id": app_id,
+            "status": new_status,
+            "updated_at": "now()",
+        }, on_conflict="stage_id,application_id").execute()
+
+        updated += 1
+
+        # Send email for Cleared / Eliminated (not Pending)
+        if new_status in ("Cleared", "Eliminated"):
+            app_resp = (
+                supabase.table("applications")
+                .select("users(name, email)")
+                .eq("id", app_id)
+                .single()
+                .execute()
+            )
+            if app_resp.data:
+                student = app_resp.data.get("users", {})
+                if student.get("email"):
+                    sent = send_stage_email(
+                        to_email=student["email"],
+                        student_name=student.get("name", "Student"),
+                        company_name=company_name,
+                        stage_name=stage_name,
+                        status=new_status,
+                    )
+                    if sent:
+                        emailed += 1
+
+    return {
+        "message": f"Updated {updated} records, sent {emailed} emails",
+        "updated": updated,
+        "emails_sent": emailed,
+    }
+
+
+# ═════════════════════════════════════════════════════════════
+#  AI INSIGHTS ROUTES
+# ═════════════════════════════════════════════════════════════
+
+# ── Resume Analysis ──────────────────────────────────────────
+
+@app.post("/api/resume/{resume_id}/analyze", tags=["AI Insights"])
+async def trigger_resume_analysis(
+    resume_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Run full AI analysis on a specific resume.
+    Returns resume_score (0–100), improvement suggestions, strength areas,
+    section detection, and component scores.
+    """
+    result = analyze_resume_by_id(resume_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/api/resume/{resume_id}/analysis", tags=["AI Insights"])
+async def get_resume_analysis(
+    resume_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve cached AI analysis for a resume.
+    Re-runs analysis if not yet computed.
+    """
+    resp = (
+        supabase.table("resume_metadata")
+        .select("id, resume_score, analysis_data, extracted_skills, extracted_projects")
+        .eq("id", resume_id)
+        .single()
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Resume not found")
+
+    if resp.data.get("analysis_data"):
+        return {"resume_id": resume_id, **resp.data["analysis_data"]}
+
+    # Compute on demand if not cached
+    return analyze_resume_by_id(resume_id)
+
+
+# ── Job Match Scoring ─────────────────────────────────────────
+
+@app.get("/api/drives/match-all", tags=["AI Insights"])
+async def job_match_all_drives(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Compute match scores for the current student against ALL drives.
+    Returns list sorted by match_score descending.
+    """
+    student_id = current_user["sub"]
+    return get_match_all_drives(student_id)
+
+
+@app.get("/api/drives/{drive_id}/match", tags=["AI Insights"])
+async def job_match_score(
+    drive_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Compute job match score for the current student vs a specific drive.
+    Returns match_score (0–100), matched/missing skills, and explanation.
+    """
+    student_id = current_user["sub"]
+    result = get_match_for_student_drive(student_id, drive_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+# ── Placement Prediction ──────────────────────────────────────
+
+@app.get("/api/ai/predict-placement", tags=["AI Insights"])
+async def placement_prediction(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Predict placement probability for the current student.
+    Returns probability (0–100%), confidence level, helping/hurting factors,
+    and recommended actions.
+    """
+    student_id = current_user["sub"]
+    return predict_placement(student_id)
+
+
+@app.get("/api/admin/predict-batch/{drive_id}", tags=["AI Insights"])
+async def placement_prediction_batch(
+    drive_id: int,
+    admin: dict = Depends(require_admin),
+):
+    """
+    Predict placement probability for all applicants of a drive.
+    Returns list sorted by probability descending. Admin-only.
+    """
+    return batch_predict(drive_id)
+
+
+# ── Smart Recommendations ─────────────────────────────────────
+
+@app.get("/api/recommendations/drives", tags=["Recommendations"])
+async def drive_recommendations(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return top 5 placement drives recommended for the current student
+    based on skill match, CGPA eligibility, and resume quality.
+    """
+    student_id = current_user["sub"]
+    return recommend_drives(student_id, top_n=5)
+
+
+@app.get("/api/recommendations/training", tags=["Recommendations"])
+async def training_recommendations(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return personalized training resources for the student's skill gaps
+    ranked by how many drives require each missing skill.
+    """
+    student_id = current_user["sub"]
+    return recommend_training(student_id, top_n=10)
+
+
+@app.get("/api/recommendations/experiences", tags=["Recommendations"])
+async def experience_recommendations(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return interview experiences for companies where the student
+    has a high job match score.
+    """
+    student_id = current_user["sub"]
+    return recommend_experiences(student_id, top_n=5)
+
+
+@app.get("/api/recommendations/all", tags=["Recommendations"])
+async def all_recommendations(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Combined recommendation endpoint: drives + training + experiences.
+    Suitable for the student dashboard recommendations panel.
+    """
+    student_id = current_user["sub"]
+    return get_all_recommendations(student_id)
+
+
+# ── Advanced Admin Analytics ──────────────────────────────────
+
+@app.get("/api/admin/analytics/trends", tags=["Advanced Analytics"])
+async def analytics_trends(
+    admin: dict = Depends(require_admin),
+):
+    """Placement trends over time (monthly). Admin-only."""
+    return get_placement_trends()
+
+
+@app.get("/api/admin/analytics/skill-demand", tags=["Advanced Analytics"])
+async def analytics_skill_demand(
+    admin: dict = Depends(require_admin),
+):
+    """Top 15 skills demanded across all drives vs student coverage. Admin-only."""
+    return get_skill_demand()
+
+
+@app.get("/api/admin/analytics/branch-rates", tags=["Advanced Analytics"])
+async def analytics_branch_rates(
+    admin: dict = Depends(require_admin),
+):
+    """Branch-wise placement rates with placed/not-placed counts. Admin-only."""
+    return get_branch_placement_rates()
+
+
+@app.get("/api/admin/analytics/funnel", tags=["Advanced Analytics"])
+async def analytics_funnel(
+    admin: dict = Depends(require_admin),
+):
+    """Application funnel: Applied → Shortlisted → Placed. Admin-only."""
+    return get_application_funnel()
+
+
+@app.get("/api/admin/analytics/recruiters", tags=["Advanced Analytics"])
+async def analytics_recruiter_activity(
+    admin: dict = Depends(require_admin),
+):
+    """Per-company: drives posted, applications, shortlisted, placed. Admin-only."""
+    return get_recruiter_activity()
+
+
+@app.get("/api/admin/analytics/packages", tags=["Advanced Analytics"])
+async def analytics_package_distribution(
+    admin: dict = Depends(require_admin),
+):
+    """Offer package distribution histogram and min/max/avg. Admin-only."""
+    return get_package_distribution()
+
+
+@app.get("/api/admin/analytics/ai-overview", tags=["Advanced Analytics"])
+async def analytics_ai_overview(
+    admin: dict = Depends(require_admin),
+):
+    """AI-driven overview: avg resume scores, avg placement predictions, funnel. Admin-only."""
+    return get_ai_overview()
 
 
 # ═════════════════════════════════════════════════════════════

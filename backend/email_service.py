@@ -158,3 +158,78 @@ def send_selection_email(
     except Exception as e:
         print(f"❌ Failed to send selection email to {to_email}: {e}")
         return False
+
+
+def send_stage_email(
+    to_email: str,
+    student_name: str,
+    company_name: str,
+    stage_name: str,
+    status: str,          # "Cleared" or "Eliminated"
+) -> bool:
+    """
+    Send a stage progress notification email to a student.
+
+    Args:
+        to_email:     Student's email address
+        student_name: Student's name
+        company_name: Company running the drive
+        stage_name:   Name of the stage (e.g. "Exam", "Interview-1", "HR Round")
+        status:       "Cleared" or "Eliminated"
+    """
+    if not SMTP_USER or not SMTP_PASS:
+        print("⚠️  SMTP credentials not configured. Skipping email.")
+        return False
+
+    if status == "Cleared":
+        subject = f"✅ You cleared {stage_name} at {company_name}!"
+        color = "#16a34a"
+        heading = "Stage Cleared — Well Done!"
+        body_line = (
+            f"Congratulations! You have successfully cleared the "
+            f"<strong>{stage_name}</strong> round for <strong>{company_name}</strong>. "
+            f"Please check your placement dashboard for details on the next stage."
+        )
+    else:
+        subject = f"Update on your application at {company_name}"
+        color = "#dc2626"
+        heading = "Application Update"
+        body_line = (
+            f"Thank you for participating in the <strong>{stage_name}</strong> round "
+            f"for <strong>{company_name}</strong>. We regret to inform you that you "
+            f"have not been selected to proceed to the next stage. We encourage you "
+            f"to continue applying to other drives on the platform."
+        )
+
+    html_body = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; padding: 20px;">
+        <h2 style="color: {color};">CampusHireAI — {heading}</h2>
+        <p>Dear <strong>{student_name}</strong>,</p>
+        <p>{body_line}</p>
+        <br>
+        <p>Best regards,<br>CampusHireAI Team</p>
+        <hr style="border: 1px solid #e5e7eb;">
+        <p style="font-size: 12px; color: #6b7280;">
+            This is an automated message. Do not reply to this email.
+        </p>
+    </body>
+    </html>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = to_email
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, to_email, msg.as_string())
+        print(f"✅ Stage email ({status}) sent to {to_email}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to send stage email to {to_email}: {e}")
+        return False
