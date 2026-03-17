@@ -133,7 +133,7 @@ function StudentDashboard() {
     ]
 
     const milestones = [
-        { label: 'Complete your profile', done: !!profile?.branch },
+        { label: 'Complete your profile', done: !!profile?.branch && profile?.cgpa !== null && profile?.cgpa !== undefined },
         { label: 'Upload your resume', done: !!resume },
         { label: 'Apply to a drive', done: applications.length > 0 },
         { label: 'Get shortlisted', done: applications.some((a) => a.status === 'Shortlisted') },

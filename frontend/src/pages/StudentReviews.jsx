@@ -16,6 +16,7 @@ function StudentReviews() {
     const [canReview, setCanReview] = useState(false)
     const [offers, setOffers] = useState([])
     const [form, setForm] = useState({ company: '', rating: 5, content: '', drive_id: '' })
+    const [searchQuery, setSearchQuery] = useState('')
 
     useEffect(() => {
         fetchReviews()
@@ -64,6 +65,20 @@ function StudentReviews() {
         return '★'.repeat(rating) + '☆'.repeat(5 - rating)
     }
 
+    // Filter reviews by search query
+    const filtered = reviews.filter((review) => {
+        const q = searchQuery.toLowerCase()
+        if (!q) return true
+        return (
+            review.company?.toLowerCase().includes(q) ||
+            review.content?.toLowerCase().includes(q) ||
+            review.drives?.company_name?.toLowerCase().includes(q) ||
+            review.drives?.role?.toLowerCase().includes(q) ||
+            review.users?.name?.toLowerCase().includes(q) ||
+            review.users?.branch?.toLowerCase().includes(q)
+        )
+    })
+
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
@@ -81,6 +96,39 @@ function StudentReviews() {
                 </div>
                 {canReview && !isAdmin && (
                     <button onClick={() => setShowForm(!showForm)} className="btn-primary">+ Write Review</button>
+                )}
+            </div>
+
+            {/* ── Search Bar ─────────────────────────────────────────── */}
+            <div className="mb-6">
+                <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sub pointer-events-none">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+                        </svg>
+                    </span>
+                    <input
+                        type="text"
+                        className="input pl-10 text-sm"
+                        placeholder="Search by company, reviewer, or keyword…"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                    {searchQuery && (
+                        <button
+                            onClick={() => setSearchQuery('')}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-sub hover:text-heading transition-colors"
+                        >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    )}
+                </div>
+                {searchQuery && (
+                    <p className="text-sub text-xs mt-1.5 ml-1">
+                        {filtered.length} result{filtered.length !== 1 ? 's' : ''} for &quot;{searchQuery}&quot;
+                    </p>
                 )}
             </div>
 
@@ -134,9 +182,9 @@ function StudentReviews() {
             )}
 
             {/* Reviews List */}
-            {reviews.length > 0 ? (
+            {filtered.length > 0 ? (
                 <div className="space-y-4 stagger">
-                    {reviews.map((review) => (
+                    {filtered.map((review) => (
                         <div key={review.id} className="card animate-fade-in">
                             <div className="flex items-start justify-between">
                                 <div className="flex-1">
@@ -168,9 +216,11 @@ function StudentReviews() {
                 </div>
             ) : (
                 <div className="card text-center py-12">
-                    <p className="text-4xl mb-3">📭</p>
-                    <p className="text-sub text-lg">No reviews yet</p>
-                    {canReview && <p className="text-sub text-sm mt-2">Be the first to share your experience!</p>}
+                    <p className="text-4xl mb-3">{searchQuery ? '🔍' : '📭'}</p>
+                    <p className="text-sub text-lg">
+                        {searchQuery ? `No review found for "${searchQuery}"` : 'No reviews yet'}
+                    </p>
+                    {!searchQuery && canReview && <p className="text-sub text-sm mt-2">Be the first to share your experience!</p>}
                 </div>
             )}
         </div>

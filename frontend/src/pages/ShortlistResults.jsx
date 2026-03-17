@@ -253,10 +253,10 @@ function ShortlistResults() {
                                     <span className="text-sm text-body whitespace-nowrap">1.7× Offer Filter</span>
                                 </label>
                             </div>
-                            <div className="flex items-end">
+                            <div className="w-full sm:w-auto flex-shrink-0 mt-2 sm:mt-0">
                                 <button
                                     onClick={handleRunShortlist}
-                                    className="btn-primary whitespace-nowrap px-5"
+                                    className="btn-primary w-full sm:w-auto px-6 whitespace-nowrap"
                                     disabled={shortlisting}
                                 >
                                     {shortlisting ? '⏳ Running…' : '🚀 Run Shortlisting'}

@@ -30,6 +30,7 @@ function DriveWorkflow() {
 
     // Add stage form
     const [addingStage, setAddingStage] = useState(false)
+    const [insertOrder, setInsertOrder] = useState(null)
     const [newStageName, setNewStageName] = useState('')
     const [savingStages, setSavingStages] = useState(false)
     const [savingProgress, setSavingProgress] = useState(false)
@@ -92,7 +93,7 @@ function DriveWorkflow() {
     const addStage = async () => {
         if (!newStageName.trim()) return
         setSavingStages(true)
-        const nextOrder = stages.length > 0 ? Math.max(...stages.map(s => s.stage_order)) + 1 : 1
+        const nextOrder = insertOrder !== null ? insertOrder : (stages.length > 0 ? Math.max(...stages.map(s => s.stage_order)) + 1 : 1)
         try {
             await api.post(`/drives/${driveId}/stages`, {
                 name: newStageName.trim(),
@@ -100,6 +101,7 @@ function DriveWorkflow() {
             })
             setNewStageName('')
             setAddingStage(false)
+            setInsertOrder(null)
             await loadDrive()
             showToast(`Stage "${newStageName.trim()}" added`)
         } catch (e) {
@@ -203,7 +205,7 @@ function DriveWorkflow() {
                             </button>
                         )}
                         <button
-                            onClick={() => setAddingStage(v => !v)}
+                            onClick={() => { setAddingStage(v => !v); setInsertOrder(null) }}
                             className="btn-secondary text-xs"
                         >
                             + Add Stage
@@ -220,15 +222,16 @@ function DriveWorkflow() {
                         >
                             <input
                                 className="input flex-1 text-sm"
-                                placeholder="Stage name (e.g. GD, HR Round, Online Test)"
+                                placeholder={insertOrder ? `Insert stage at position ${insertOrder} (e.g. Technical Round)` : "Stage name (e.g. GD, HR Round, Online Test)"}
                                 value={newStageName}
                                 onChange={e => setNewStageName(e.target.value)}
                                 onKeyDown={e => e.key === 'Enter' && addStage()}
+                                autoFocus
                             />
                             <button onClick={addStage} disabled={savingStages} className="btn-primary text-sm">
-                                {savingStages ? 'Adding…' : 'Add'}
+                                {savingStages ? 'Adding…' : insertOrder ? 'Insert Stage' : 'Add Stage'}
                             </button>
-                            <button onClick={() => setAddingStage(false)} className="btn-secondary text-sm">Cancel</button>
+                            <button onClick={() => { setAddingStage(false); setInsertOrder(null) }} className="btn-secondary text-sm">Cancel</button>
                         </motion.div>
                     )}
                 </AnimatePresence>
@@ -240,23 +243,36 @@ function DriveWorkflow() {
                     </p>
                 ) : (
                     <div className="flex flex-wrap gap-2 items-center">
+                        <button onClick={() => { setAddingStage(true); setInsertOrder(stages[0]?.stage_order || 1) }} className="w-6 h-6 rounded-full flex items-center justify-center bg-white/5 hover:bg-primary-500 hover:text-white text-sub text-xs transition-colors shadow-sm" title="Insert stage at start">+</button>
+                        
                         {stages.map((s, i) => (
                             <div key={s.id} className="flex items-center gap-2">
                                 <button
                                     onClick={() => selectStage(s)}
                                     className={`px-4 py-2 rounded-lg text-sm font-medium transition-all border ${activeStage?.id === s.id
-                                        ? 'bg-primary-500 text-white border-primary-500'
+                                        ? 'bg-primary-500 text-white border-primary-500 shadow-md shadow-primary-500/20'
                                         : 'bg-white/5 text-sub border-white/10 hover:border-white/25 hover:text-heading'
                                         }`}
                                 >
-                                    {s.stage_order}. {s.name}
+                                    {s.name}
                                 </button>
                                 <button
                                     onClick={() => deleteStage(s.id)}
-                                    className="text-red-400/50 hover:text-red-400 text-xs transition-colors"
+                                    className="text-red-400/50 hover:text-red-400 text-xs transition-colors shrink-0 p-1"
                                     title="Delete stage"
                                 >✕</button>
-                                {i < stages.length - 1 && <span className="text-sub">→</span>}
+                                
+                                {i < stages.length - 1 ? (
+                                    <>
+                                        <span className="text-sub font-light">→</span>
+                                        <button onClick={() => { setAddingStage(true); setInsertOrder(stages[i + 1].stage_order) }} className="w-6 h-6 rounded-full flex items-center justify-center bg-white/5 hover:bg-primary-500 hover:text-white text-sub text-xs transition-colors shadow-sm" title="Insert stage here">+</button>
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="text-sub font-light">→</span>
+                                        <button onClick={() => { setAddingStage(true); setInsertOrder(null) }} className="w-6 h-6 rounded-full flex items-center justify-center bg-white/5 hover:bg-primary-500 hover:text-white text-sub text-xs transition-colors shadow-sm" title="Append stage at end">+</button>
+                                    </>
+                                )}
                             </div>
                         ))}
                     </div>

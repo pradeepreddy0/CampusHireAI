@@ -212,6 +212,10 @@ function ApplyDrive() {
                             View your applications →
                         </Link>
                     </div>
+                ) : drive?.deadline && new Date(drive.deadline) < new Date() ? (
+                    <button className="btn-primary w-full opacity-50 cursor-not-allowed" disabled>
+                        ⏳ Deadline Passed
+                    </button>
                 ) : (
                     <button onClick={handleApply} className="btn-primary w-full" disabled={applying}>
                         {applying ? 'Submitting...' : `Apply${selectedResume ? ` with "${selectedResume.label}"` : ''}`}

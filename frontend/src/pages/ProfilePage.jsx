@@ -49,14 +49,16 @@ function ProfilePage() {
         setError('')
         setSuccess('')
         try {
-            await api.put('/me', {
+            const payload = {
                 name: form.name,
                 branch: form.branch,
                 cgpa: form.cgpa ? parseFloat(form.cgpa) : null,
-                roll_no: form.roll_no,
-                phone: form.phone,
-            })
-            setProfile({ ...profile, ...form })
+                roll_no: form.roll_no
+            };
+            await api.put('/me', payload)
+            
+            // Merging the strict payload to ensure cgpa is a Number, not a String
+            setProfile({ ...profile, ...payload })
             setEditing(false)
             setSuccess('Profile updated successfully!')
             setTimeout(() => setSuccess(''), 3000)
@@ -151,7 +153,6 @@ function ProfilePage() {
                                 { label: 'Roll Number', value: profile?.roll_no || '—', icon: '🎓' },
                                 { label: 'Branch', value: profile?.branch || '—', icon: '🏛️' },
                                 { label: 'CGPA', value: profile?.cgpa || '—', icon: '📊' },
-                                { label: 'Phone', value: profile?.phone || '—', icon: '📱' },
                             ].map(({ label, value, icon }) => (
                                 <div key={label} className="flex items-start gap-3 p-3 rounded-xl border border-current/5 bg-white/[0.02]">
                                     <span className="text-lg mt-0.5">{icon}</span>
@@ -213,11 +214,6 @@ function ProfilePage() {
                                     <input type="number" step="0.01" min="0" max="10" className="input"
                                         placeholder="e.g. 8.5" value={form.cgpa}
                                         onChange={(e) => setForm({ ...form, cgpa: e.target.value })} />
-                                </div>
-                                <div>
-                                    <label className="label">Phone Number</label>
-                                    <input className="input" placeholder="+91 9876543210"
-                                        value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
                                 </div>
                             </div>
 

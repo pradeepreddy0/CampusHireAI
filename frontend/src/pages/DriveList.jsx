@@ -357,10 +357,16 @@ function DriveList() {
                                             </>
                                         ) : (
                                             <>
-                                                <Link to={`/drives/${drive.id}/apply`}
-                                                    className="btn-primary text-xs flex-1 text-center group-hover:shadow-lg">
-                                                    Apply Now →
-                                                </Link>
+                                                {drive.deadline && new Date(drive.deadline) < new Date() ? (
+                                                    <button disabled className="btn-primary flex-1 text-xs opacity-50 cursor-not-allowed text-center">
+                                                        ⏳ Closed
+                                                    </button>
+                                                ) : (
+                                                    <Link to={`/drives/${drive.id}/apply`}
+                                                        className="btn-primary text-xs flex-1 text-center group-hover:shadow-lg">
+                                                        Apply Now →
+                                                    </Link>
+                                                )}
                                                 <Link to={`/experiences/${drive.id}`} className="btn-secondary text-xs">
                                                     💡 Prep
                                                 </Link>

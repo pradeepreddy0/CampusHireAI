@@ -202,9 +202,16 @@ async def update_profile(
     user_id = current_user["sub"]
 
     allowed = {}
-    for field in ("name", "branch", "cgpa", "roll_no", "phone", "cgpa_10th", "percentage_12th"):
-        if field in body and body[field] is not None:
-            allowed[field] = body[field]
+    for field in ("name", "branch", "cgpa", "roll_no", "cgpa_10th", "percentage_12th"):
+        if field in body:
+            val = body[field]
+            # Convert empty strings to None to prevent unique constraint errors (e.g., roll_no)
+            if val == "":
+                val = None
+            # Do not allow clearing the name
+            if field == "name" and not val:
+                continue
+            allowed[field] = val
 
     if not allowed:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -1199,6 +1206,18 @@ async def create_drive_stage(
     order = body.get("stage_order")
     if not name or order is None:
         raise HTTPException(status_code=400, detail="name and stage_order are required")
+
+    # Shift downstream stages up by 1 to make room
+    existing = (
+        supabase.table("drive_stages")
+        .select("id, stage_order")
+        .eq("drive_id", drive_id)
+        .gte("stage_order", order)
+        .execute()
+    )
+    if existing.data:
+        for stg in existing.data:
+            supabase.table("drive_stages").update({"stage_order": stg["stage_order"] + 1}).eq("id", stg["id"]).execute()
 
     resp = supabase.table("drive_stages").insert({
         "drive_id": drive_id,

@@ -20,6 +20,8 @@ CREATE TABLE users (
     branch      TEXT,
     cgpa        NUMERIC(4, 2) DEFAULT 0.00
                 CHECK (cgpa >= 0 AND cgpa <= 10),
+    cgpa_10th        NUMERIC(4, 2) DEFAULT 0.00,
+    percentage_12th  NUMERIC(5, 2) DEFAULT 0.00,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
